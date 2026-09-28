@@ -24,6 +24,10 @@ from agent_cli.server.whisper.backends.base import (
 
 logger = logging.getLogger(__name__)
 
+# Whisper models see 30 s windows; the feature extractor truncates longer audio to
+# this unless asked not to (WhisperFeatureExtractor chunk_length default).
+_WHISPER_WINDOW_SECONDS = 30
+
 # Model name mapping: canonical name -> HuggingFace repo
 _MODEL_MAP: dict[str, str] = {
     "tiny": "openai/whisper-tiny",
@@ -383,18 +387,29 @@ def _transcribe_with_generate(
     import torch  # noqa: PLC0415
 
     audio_tensor = torch.from_numpy(audio_array)
+    # Longer audio needs untruncated features and timestamp-based sequential
+    # long-form generation; shorter audio must keep the fixed 30 s padding.
+    long_form = duration > _WHISPER_WINDOW_SECONDS
+    long_form_kwargs = (
+        {"truncation": False, "padding": "longest", "return_attention_mask": True}
+        if long_form
+        else {}
+    )
     inputs = _state.processor(
         audio_tensor,
         sampling_rate=sample_rate,
         return_tensors="pt",
+        **long_form_kwargs,
     )
-    inputs = {k: v.to(_state.device) for k, v in inputs.items()}
+    # Cast features to the model dtype too: on GPU the model is float16, and float32
+    # features fail with "Input type (float) and bias type (struct c10::Half) should be the same".
+    inputs = _move_inputs_to_device(inputs)
 
     generate_args: dict[str, Any] = {
         **inputs,
         "num_beams": beam_size,
         "task": task,
-        "return_timestamps": False,
+        "return_timestamps": long_form,
     }
 
     if "attention_mask" not in generate_args:

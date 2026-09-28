@@ -294,6 +294,146 @@ def test_transcribe_qwen3_asr_returns_parsed_transcription(
     }
 
 
+def test_transcribe_with_generate_casts_features_to_model_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whisper generate inputs must be cast to the model dtype, not only moved.
+
+    On GPU the model is loaded as float16 while the processor returns float32
+    features, which fails in the encoder conv with "Input type (float) and bias
+    type (struct c10::Half) should be the same". Evidence: transformers
+    BatchFeature.to(device, dtype=...) casts only floating point tensors and
+    just moves integer tensors (transformers/feature_extraction_utils.py,
+    BatchFeature.to, "We cast only floating point tensors").
+    """
+    to_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class BatchFeature(dict):
+        def to(self, *args: object, **kwargs: object) -> BatchFeature:
+            to_calls.append((args, kwargs))
+            return self
+
+    class Processor:
+        def __call__(self, *_args: object, **_kwargs: object) -> BatchFeature:
+            return BatchFeature(input_features="features", attention_mask="mask")
+
+        def batch_decode(self, generated_ids: object, **_kwargs: object) -> list[str]:
+            return [" hello "] if generated_ids == "ids" else ["wrong"]
+
+    class Model:
+        def generate(self, **kwargs: object) -> str:
+            assert kwargs["input_features"] == "features"
+            return "ids"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(from_numpy=lambda array: array, no_grad=nullcontext),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_state",
+        backend._SubprocessState(
+            model=Model(),
+            processor=Processor(),
+            dtype="float16",
+            device="xpu",
+        ),
+    )
+
+    result = backend._transcribe_with_generate(
+        audio_array=object(),
+        sample_rate=16000,
+        effective_language="en",
+        task="transcribe",
+        initial_prompt=None,
+        beam_size=1,
+        duration=1.0,
+    )
+
+    assert to_calls == [(("xpu",), {"dtype": "float16"})]
+    assert result["text"] == "hello"
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected_processor_kwargs", "expected_timestamps"),
+    [
+        (12.0, {}, False),
+        (
+            67.0,
+            {"truncation": False, "padding": "longest", "return_attention_mask": True},
+            True,
+        ),
+    ],
+)
+def test_transcribe_with_generate_uses_long_form_over_30_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+    duration: float,
+    expected_processor_kwargs: dict[str, object],
+    expected_timestamps: bool,  # noqa: FBT001
+) -> None:
+    """Audio longer than Whisper's 30 s window must not be truncated.
+
+    Evidence (transformers 5.17): WhisperFeatureExtractor.__call__ defaults to
+    truncation=True and max_length=chunk_length (30) * sampling_rate, dropping
+    everything after 30 s. WhisperGenerationMixin.generate docs: "To transcribe or
+    translate audios longer than 30 seconds, process the audio files without
+    truncation and pass all mel features at once to generate. It is necessary to
+    set `return_timestamps=True`." Short audio keeps the default fixed-length
+    padding, which short-form generation requires.
+    """
+    processor_kwargs: list[dict[str, object]] = []
+    generate_kwargs: list[dict[str, object]] = []
+
+    class BatchFeature(dict):
+        def to(self, *_args: object, **_kwargs: object) -> BatchFeature:
+            return self
+
+    class Processor:
+        def __call__(self, *_args: object, **kwargs: object) -> BatchFeature:
+            processor_kwargs.append(
+                {k: v for k, v in kwargs.items() if k not in {"sampling_rate", "return_tensors"}},
+            )
+            return BatchFeature(input_features="features", attention_mask="mask")
+
+        def batch_decode(self, *_args: object, **_kwargs: object) -> list[str]:
+            return ["text"]
+
+    class Model:
+        def generate(self, **kwargs: object) -> str:
+            generate_kwargs.append(kwargs)
+            return "ids"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(from_numpy=lambda array: array, no_grad=nullcontext),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_state",
+        backend._SubprocessState(
+            model=Model(),
+            processor=Processor(),
+            dtype="float16",
+            device="xpu",
+        ),
+    )
+
+    backend._transcribe_with_generate(
+        audio_array=object(),
+        sample_rate=16000,
+        effective_language="en",
+        task="transcribe",
+        initial_prompt=None,
+        beam_size=1,
+        duration=duration,
+    )
+
+    assert processor_kwargs == [expected_processor_kwargs]
+    assert generate_kwargs[0]["return_timestamps"] is expected_timestamps
+
+
 def test_transcribe_qwen3_asr_rejects_truncated_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

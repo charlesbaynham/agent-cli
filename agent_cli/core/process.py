@@ -307,15 +307,20 @@ def _wait_for_process_start(
 def _signal_running_process(process_name: str, pid: int) -> None:
     """Signal a known-running process and clean control files if it exits."""
     stop_file = _get_stop_file(process_name)
-    should_force_kill = sys.platform != "win32" and stop_file.exists()
+    should_force_kill = stop_file.exists()
 
-    # On Windows, create stop file to signal graceful shutdown
     if sys.platform == "win32":
-        stop_file.touch()
-
-    # Send SIGINT first; escalate to SIGKILL only when the same PID survives
-    # repeated stop attempts beyond the configured timeout.
-    stop_signal = signal.SIGKILL if should_force_kill else signal.SIGINT
+        if not should_force_kill:
+            # os.kill() on Windows is TerminateProcess, which would discard the
+            # recording. Request a graceful stop via the stop file instead; the
+            # process removes it on exit. A repeated request force-kills.
+            stop_file.touch()
+            return
+        stop_signal = signal.SIGTERM
+    else:
+        # Send SIGINT first; escalate to SIGKILL only when the same PID survives
+        # repeated stop attempts beyond the configured timeout.
+        stop_signal = signal.SIGKILL if should_force_kill else signal.SIGINT
     process_stopped = False
     try:
         os.kill(pid, stop_signal)
@@ -328,9 +333,6 @@ def _signal_running_process(process_name: str, pid: int) -> None:
     except (ProcessLookupError, PermissionError):
         process_stopped = not _is_pid_running(pid)
 
-    # Clean up
-    if sys.platform == "win32":
-        clear_stop_file(process_name)
     # Keep PID file if process is still alive so subsequent --status/--toggle
     # calls continue targeting the same process.
     if process_stopped:

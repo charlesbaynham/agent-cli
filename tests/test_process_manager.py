@@ -410,41 +410,57 @@ def test_pid_file_context_exception_cleanup() -> None:
     assert not pid_file.exists()
 
 
-def test_stop_process_creates_stop_file_on_windows(
+def test_stop_process_requests_graceful_stop_on_windows(
     temp_pid_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that stop_process creates a stop file on Windows for graceful shutdown."""
+    """On Windows, the first stop request only creates the stop file.
+
+    Evidence: Python docs for os.kill state that on Windows any signal other than
+    CTRL_C_EVENT/CTRL_BREAK_EVENT "will cause the process to be unconditionally
+    killed by the TerminateProcess API" (https://docs.python.org/3/library/os.html#os.kill).
+    Sending SIGINT would therefore discard an in-progress recording.
+    """
     process_name = "test-process"
     pid_file = temp_pid_dir / f"{process_name}.pid"
     stop_file = temp_pid_dir / f"{process_name}.stop"
-
-    # Write a fake PID (not current process to avoid sending real signals)
     pid_file.write_text("12345")
-
-    # Track if stop file was created during execution
-    stop_file_created = False
-
-    original_touch = Path.touch
-
-    def tracking_touch(self: Path) -> None:
-        nonlocal stop_file_created
-        if self == stop_file:
-            stop_file_created = True
-        original_touch(self)
 
     # Mock sys.platform and _is_pid_running to avoid ctypes.windll.
     monkeypatch.setattr(process.sys, "platform", "win32")
     with (
-        patch.object(process, "_is_pid_running", side_effect=[True, False]),
-        patch.object(Path, "touch", tracking_touch),
-        patch("os.kill"),
+        patch.object(process, "_is_pid_running", return_value=True),
+        patch("os.kill") as mock_os_kill,
     ):
-        process.stop_process(process_name)
+        result = process.stop_process(process_name)
 
-    # Verify stop file was created during the call
-    assert stop_file_created
-    # Stop file should be cleaned up after kill
+    assert result.was_running is True
+    mock_os_kill.assert_not_called()
+    # The running process removes the stop file itself when it exits.
+    assert stop_file.exists()
+    assert pid_file.exists()
+
+
+def test_stop_process_force_kills_on_second_request_on_windows(
+    temp_pid_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows, a repeated stop request terminates the process."""
+    process_name = "test-process"
+    pid_file = temp_pid_dir / f"{process_name}.pid"
+    stop_file = temp_pid_dir / f"{process_name}.stop"
+    pid_file.write_text("12345")
+    stop_file.touch()
+
+    monkeypatch.setattr(process.sys, "platform", "win32")
+    with (
+        patch.object(process, "_is_pid_running", side_effect=[True, False]),
+        patch("os.kill") as mock_os_kill,
+    ):
+        result = process.stop_process(process_name)
+
+    assert result.was_running is True
+    mock_os_kill.assert_called_once_with(12345, signal.SIGTERM)
     assert not stop_file.exists()
     assert not pid_file.exists()
 
