@@ -239,6 +239,60 @@ async def test_live_preview_console_disables_rich_live_status(
 @patch("agent_cli.agents.transcribe.signal_handling_context")
 @patch("agent_cli.agents.transcribe.maybe_live")
 @patch("agent_cli.agents.transcribe.asr.create_transcriber")
+async def test_extra_instructions_not_sent_to_asr(
+    mock_create_transcriber: MagicMock,
+    mock_maybe_live: MagicMock,
+    mock_signal_handling_context: MagicMock,
+) -> None:
+    """Extra instructions are for LLM cleanup only.
+
+    Whisper treats its prompt as preceding transcript text, and a long instruction
+    block made the transformers backend loop ("What do you reckon? What do you ...").
+    """
+    mock_maybe_live.return_value = nullcontext(None)
+    live_transcriber = AsyncMock(return_value="hello world")
+    mock_create_transcriber.return_value = live_transcriber
+    mock_signal_handling_context.return_value.__enter__.return_value = asyncio.Event()
+
+    await transcribe._async_main(
+        extra_instructions="Use British spelling.",
+        provider_cfg=config.ProviderSelection(
+            asr_provider="wyoming",
+            llm_provider="ollama",
+            tts_provider="wyoming",
+        ),
+        general_cfg=config.General(
+            log_level="INFO",
+            log_file=None,
+            quiet=True,
+            list_devices=False,
+            clipboard=False,
+        ),
+        audio_in_cfg=config.AudioInput(),
+        wyoming_asr_cfg=config.WyomingASR(asr_wyoming_ip="localhost", asr_wyoming_port=12345),
+        openai_asr_cfg=config.OpenAIASR(asr_openai_model="whisper-1"),
+        gemini_asr_cfg=config.GeminiASR(
+            asr_gemini_model="gemini-2.0-flash",
+            gemini_api_key="test-key",
+        ),
+        ollama_cfg=config.Ollama(llm_ollama_model="", llm_ollama_host=""),
+        openai_llm_cfg=config.OpenAILLM(llm_openai_model="", openai_base_url=None),
+        gemini_llm_cfg=config.GeminiLLM(
+            llm_gemini_model="gemini-1.5-flash",
+            gemini_api_key="test-key",
+        ),
+        llm_enabled=False,
+        transcription_log=None,
+        emit_output=False,
+    )
+
+    assert "extra_instructions" not in live_transcriber.call_args.kwargs
+
+
+@pytest.mark.asyncio
+@patch("agent_cli.agents.transcribe.signal_handling_context")
+@patch("agent_cli.agents.transcribe.maybe_live")
+@patch("agent_cli.agents.transcribe.asr.create_transcriber")
 async def test_live_preview_console_keeps_rich_live_status_for_non_wyoming_provider(
     mock_create_transcriber: MagicMock,
     mock_maybe_live: MagicMock,

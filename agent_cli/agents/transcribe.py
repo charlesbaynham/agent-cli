@@ -414,7 +414,6 @@ async def _async_main(  # noqa: PLR0912, PLR0915, C901
                     LOGGER,
                     quiet=general_cfg.quiet,
                     file_suffix=suffix if use_native_format else ".wav",
-                    extra_instructions=extra_instructions,
                 )
             elif provider_cfg.asr_provider == "gemini":
                 transcript = await recorded_transcriber(
@@ -423,7 +422,6 @@ async def _async_main(  # noqa: PLR0912, PLR0915, C901
                     LOGGER,
                     quiet=general_cfg.quiet,
                     file_suffix=suffix if use_native_format else ".wav",
-                    extra_instructions=extra_instructions,
                 )
             elif provider_cfg.asr_provider == "wyoming":
                 transcript = await recorded_transcriber(
@@ -431,7 +429,6 @@ async def _async_main(  # noqa: PLR0912, PLR0915, C901
                     wyoming_asr_cfg=wyoming_asr_cfg,
                     logger=LOGGER,
                     quiet=general_cfg.quiet,
-                    extra_instructions=extra_instructions,
                 )
             else:
                 msg = f"Unsupported ASR provider: {provider_cfg.asr_provider}"
@@ -471,7 +468,6 @@ async def _async_main(  # noqa: PLR0912, PLR0915, C901
                     quiet=general_cfg.quiet,
                     live=live,
                     save_recording=save_recording,
-                    extra_instructions=extra_instructions,
                     recording_path_callback=_set_saved_recording_path,
                     audio_level_callback=audio_level_callback,
                     live_preview_config=live_preview_config,
@@ -644,8 +640,8 @@ def transcribe(  # noqa: PLR0912, PLR0911, PLR0915, C901
         None,
         "--extra-instructions",
         help=(
-            "Extra ASR context where supported, and LLM cleanup instructions when "
-            "`--llm` is enabled. The NeMo backend ignores ASR text prompts."
+            "Extra LLM cleanup instructions when `--llm` is enabled. Not sent to ASR "
+            "(long instruction prompts can make Whisper loop)."
         ),
         rich_help_panel="LLM Configuration",
     ),
